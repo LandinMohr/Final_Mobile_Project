@@ -2,14 +2,14 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useEffect, useState } from "react";
 
 import {
-    Alert,
-    FlatList,
-    Platform,
-    StyleSheet,
-    Text,
-    TextInput,
-    TouchableOpacity,
-    View,
+  Alert,
+  FlatList,
+  Platform,
+  StyleSheet,
+  Text,
+  TextInput,
+  TouchableOpacity,
+  View,
 } from "react-native";
 
 const STORAGE_KEY = "TODOS_STORAGE_KEY";
@@ -18,10 +18,12 @@ export default function TodoScreen() {
   const [task, setTask] = useState("");
   const [tasks, setTasks] = useState<string[]>([]);
 
+  // Load tasks when component mounts
   useEffect(() => {
     loadTasks();
   }, []);
 
+  // Retrieve tasks from AsyncStorage
   const loadTasks = async () => {
     try {
       const saved = await AsyncStorage.getItem(STORAGE_KEY);
@@ -31,6 +33,7 @@ export default function TodoScreen() {
     }
   };
 
+  // Save tasks to AsyncStorage
   const saveTasks = async (newTasks: string[]) => {
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newTasks));
@@ -39,26 +42,31 @@ export default function TodoScreen() {
     }
   };
 
+  // Add new task
   const addTask = () => {
-    if (!task.trim()) return;
+    const trimmed = task.trim();
+    if (!trimmed) return;
 
-    const newTasks = [...tasks, task];
+    const newTasks = [...tasks, trimmed];
     setTasks(newTasks);
     saveTasks(newTasks);
     setTask("");
   };
 
+  // Delete individual task
   const deleteTask = (index: number) => {
     const newTasks = tasks.filter((_, i) => i !== index);
     setTasks(newTasks);
     saveTasks(newTasks);
   };
 
+  // Clear all tasks
   const clearTasks = async () => {
     setTasks([]);
     await AsyncStorage.removeItem(STORAGE_KEY);
   };
 
+  // Confirm before clearing tasks
   const confirmClearTasks = () => {
     if (Platform.OS === "web") {
       const confirmed = window.confirm(
@@ -66,7 +74,6 @@ export default function TodoScreen() {
       );
 
       if (confirmed) clearTasks();
-
       return;
     }
 
@@ -83,15 +90,21 @@ export default function TodoScreen() {
       ],
     );
   };
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Todo List</Text>
+
+      {/* Dynamic Task Count */}
+      <Text style={styles.countText}>Total Tasks: {tasks.length}</Text>
 
       <TextInput
         style={styles.input}
         placeholder="Enter task"
         value={task}
         onChangeText={setTask}
+        onSubmitEditing={addTask}
+        returnKeyType="done"
       />
 
       <TouchableOpacity style={styles.addButton} onPress={addTask}>
@@ -132,7 +145,14 @@ const styles = StyleSheet.create({
   title: {
     fontSize: 24,
     textAlign: "center",
-    marginBottom: 20,
+    marginBottom: 10,
+  },
+
+  countText: {
+    fontSize: 16,
+    textAlign: "center",
+    marginBottom: 15,
+    fontWeight: "500",
   },
 
   input: {
