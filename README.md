@@ -1,3 +1,5 @@
+ADDED MORE AT THE BOTTOM
+
 # Welcome to your Expo app 👋
 
 This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
@@ -48,3 +50,24 @@ Join our community of developers creating universal apps.
 
 - [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
 - [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+
+App Concept:
+Simple Todo List mobile application.
+
+Features:
+
+- Add tasks
+- Delete tasks
+- Clear all tasks with confirmation
+- Persistent storage using AsyncStorage
+- API data display screen
+
+Data Management:
+Used React Native AsyncStorage for local persistence.
+
+Challenges:
+(Optional — write something simple like routing and state management)
+
+How to Run:
+npm install
+npx expo start
