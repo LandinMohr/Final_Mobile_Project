@@ -4,6 +4,7 @@ import React, { useEffect, useState } from "react";
 import {
   Alert,
   FlatList,
+  Modal,
   Platform,
   StyleSheet,
   Text,
@@ -18,12 +19,14 @@ export default function TodoScreen() {
   const [task, setTask] = useState("");
   const [tasks, setTasks] = useState<string[]>([]);
 
-  // Load tasks when component mounts
+  const [editModalVisible, setEditModalVisible] = useState(false);
+  const [editingText, setEditingText] = useState("");
+  const [editingIndex, setEditingIndex] = useState<number | null>(null);
+
   useEffect(() => {
     loadTasks();
   }, []);
 
-  // Retrieve tasks from AsyncStorage
   const loadTasks = async () => {
     try {
       const saved = await AsyncStorage.getItem(STORAGE_KEY);
@@ -33,7 +36,6 @@ export default function TodoScreen() {
     }
   };
 
-  // Save tasks to AsyncStorage
   const saveTasks = async (newTasks: string[]) => {
     try {
       await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newTasks));
@@ -42,7 +44,6 @@ export default function TodoScreen() {
     }
   };
 
-  // Add new task
   const addTask = () => {
     const trimmed = task.trim();
     if (!trimmed) return;
@@ -53,27 +54,41 @@ export default function TodoScreen() {
     setTask("");
   };
 
-  // Delete individual task
   const deleteTask = (index: number) => {
     const newTasks = tasks.filter((_, i) => i !== index);
     setTasks(newTasks);
     saveTasks(newTasks);
   };
 
-  // Clear all tasks
+  const editTask = (index: number) => {
+    setEditingIndex(index);
+    setEditingText(tasks[index]);
+    setEditModalVisible(true);
+  };
+
+  const saveEditedTask = () => {
+    if (!editingText.trim() || editingIndex === null) return;
+
+    const updatedTasks = [...tasks];
+    updatedTasks[editingIndex] = editingText.trim();
+
+    setTasks(updatedTasks);
+    saveTasks(updatedTasks);
+
+    setEditModalVisible(false);
+    setEditingIndex(null);
+  };
+
   const clearTasks = async () => {
     setTasks([]);
     await AsyncStorage.removeItem(STORAGE_KEY);
   };
 
-  // Confirm before clearing tasks
   const confirmClearTasks = () => {
     if (Platform.OS === "web") {
-      const confirmed = window.confirm(
-        "Are you sure you want to delete all tasks?",
-      );
-
-      if (confirmed) clearTasks();
+      if (window.confirm("Are you sure you want to delete all tasks?")) {
+        clearTasks();
+      }
       return;
     }
 
@@ -82,11 +97,7 @@ export default function TodoScreen() {
       "Are you sure you want to delete all tasks?",
       [
         { text: "Cancel", style: "cancel" },
-        {
-          text: "Delete",
-          style: "destructive",
-          onPress: clearTasks,
-        },
+        { text: "Delete", style: "destructive", onPress: clearTasks },
       ],
     );
   };
@@ -95,7 +106,6 @@ export default function TodoScreen() {
     <View style={styles.container}>
       <Text style={styles.title}>Todo List</Text>
 
-      {/* Dynamic Task Count */}
       <Text style={styles.countText}>Total Tasks: {tasks.length}</Text>
 
       <TextInput
@@ -122,15 +132,61 @@ export default function TodoScreen() {
           <View style={styles.taskRow}>
             <Text style={styles.taskText}>• {item}</Text>
 
-            <TouchableOpacity
-              style={styles.deleteButton}
-              onPress={() => deleteTask(index)}
-            >
-              <Text style={styles.deleteButtonText}>Delete</Text>
-            </TouchableOpacity>
+            <View style={{ flexDirection: "row" }}>
+              <TouchableOpacity
+                style={styles.editButton}
+                onPress={() => editTask(index)}
+              >
+                <Text style={styles.editButtonText}>Edit</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.deleteButton}
+                onPress={() => deleteTask(index)}
+              >
+                <Text style={styles.deleteButtonText}>Delete</Text>
+              </TouchableOpacity>
+            </View>
           </View>
         )}
       />
+
+      {/* Edit Modal */}
+      <Modal
+        visible={editModalVisible}
+        animationType="slide"
+        transparent
+        onRequestClose={() => setEditModalVisible(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContainer}>
+            <Text style={styles.modalTitle}>Edit Task</Text>
+
+            <TextInput
+              style={styles.modalInput}
+              value={editingText}
+              onChangeText={setEditingText}
+              placeholder="Edit task"
+            />
+
+            <View style={{ flexDirection: "row", marginTop: 15 }}>
+              <TouchableOpacity
+                style={styles.modalSaveButton}
+                onPress={saveEditedTask}
+              >
+                <Text style={{ color: "white" }}>Save</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.modalCancelButton}
+                onPress={() => setEditModalVisible(false)}
+              >
+                <Text style={{ color: "white" }}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -191,6 +247,19 @@ const styles = StyleSheet.create({
     fontSize: 14,
   },
 
+  editButton: {
+    backgroundColor: "#FFA500",
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 4,
+    marginRight: 6,
+  },
+
+  editButtonText: {
+    color: "white",
+    fontSize: 12,
+  },
+
   deleteButton: {
     backgroundColor: "#6c757d",
     paddingVertical: 4,
@@ -213,5 +282,50 @@ const styles = StyleSheet.create({
   taskText: {
     fontSize: 16,
     flex: 1,
+  },
+
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.5)",
+    justifyContent: "center",
+    alignItems: "center",
+  },
+
+  modalContainer: {
+    width: "80%",
+    backgroundColor: "white",
+    padding: 20,
+    borderRadius: 10,
+  },
+
+  modalTitle: {
+    fontSize: 18,
+    fontWeight: "600",
+    marginBottom: 15,
+    textAlign: "center",
+  },
+
+  modalInput: {
+    borderWidth: 1,
+    padding: 10,
+    borderRadius: 6,
+  },
+
+  modalSaveButton: {
+    flex: 1,
+    backgroundColor: "#007AFF",
+    padding: 10,
+    marginRight: 5,
+    borderRadius: 6,
+    alignItems: "center",
+  },
+
+  modalCancelButton: {
+    flex: 1,
+    backgroundColor: "red",
+    padding: 10,
+    marginLeft: 5,
+    borderRadius: 6,
+    alignItems: "center",
   },
 });
