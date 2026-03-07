@@ -1,6 +1,5 @@
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import React, { useEffect, useState } from "react";
-
 import {
   Alert,
   FlatList,
@@ -13,15 +12,23 @@ import {
   View,
 } from "react-native";
 
+import { MaterialIcons } from "@expo/vector-icons";
+import ConfettiCannon from "react-native-confetti-cannon";
+
 const STORAGE_KEY = "TODOS_STORAGE_KEY";
+
+type Task = {
+  text: string;
+  completed: boolean;
+};
 
 export default function TodoScreen() {
   const [task, setTask] = useState("");
-  const [tasks, setTasks] = useState<string[]>([]);
-
+  const [tasks, setTasks] = useState<Task[]>([]);
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editingText, setEditingText] = useState("");
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
+  const [showConfetti, setShowConfetti] = useState(false);
 
   useEffect(() => {
     loadTasks();
@@ -36,47 +43,55 @@ export default function TodoScreen() {
     }
   };
 
-  const saveTasks = async (newTasks: string[]) => {
-    try {
-      await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newTasks));
-    } catch (error) {
-      console.log(error);
-    }
+  const saveTasks = async (newTasks: Task[]) => {
+    await AsyncStorage.setItem(STORAGE_KEY, JSON.stringify(newTasks));
   };
 
   const addTask = () => {
     const trimmed = task.trim();
     if (!trimmed) return;
 
-    const newTasks = [...tasks, trimmed];
+    const newTasks = [...tasks, { text: trimmed, completed: false }];
     setTasks(newTasks);
     saveTasks(newTasks);
     setTask("");
   };
 
-  const deleteTask = (index: number) => {
+  const toggleComplete = (index: number) => {
+    const updated = [...tasks];
+    updated[index].completed = !updated[index].completed;
+
+    setTasks(updated);
+    saveTasks(updated);
+  };
+
+  const completeTask = (index: number) => {
     const newTasks = tasks.filter((_, i) => i !== index);
+
     setTasks(newTasks);
     saveTasks(newTasks);
+
+    setShowConfetti(true);
+    setTimeout(() => setShowConfetti(false), 2500);
   };
 
-  const editTask = (index: number) => {
-    setEditingIndex(index);
-    setEditingText(tasks[index]);
-    setEditModalVisible(true);
-  };
+  const deleteTask = (index: number) => {
+    const remove = () => {
+      const newTasks = tasks.filter((_, i) => i !== index);
+      setTasks(newTasks);
+      saveTasks(newTasks);
+    };
 
-  const saveEditedTask = () => {
-    if (!editingText.trim() || editingIndex === null) return;
+    if (Platform.OS === "web") {
+      const confirmed = window.confirm("Delete this task?");
+      if (confirmed) remove();
+      return;
+    }
 
-    const updatedTasks = [...tasks];
-    updatedTasks[editingIndex] = editingText.trim();
-
-    setTasks(updatedTasks);
-    saveTasks(updatedTasks);
-
-    setEditModalVisible(false);
-    setEditingIndex(null);
+    Alert.alert("Delete Task", "Are you sure you want to delete this task?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Delete", style: "destructive", onPress: remove },
+    ]);
   };
 
   const clearTasks = async () => {
@@ -102,6 +117,25 @@ export default function TodoScreen() {
     );
   };
 
+  const editTask = (index: number) => {
+    setEditingIndex(index);
+    setEditingText(tasks[index].text);
+    setEditModalVisible(true);
+  };
+
+  const saveEditedTask = () => {
+    if (!editingText.trim() || editingIndex === null) return;
+
+    const updated = [...tasks];
+    updated[editingIndex].text = editingText.trim();
+
+    setTasks(updated);
+    saveTasks(updated);
+
+    setEditModalVisible(false);
+    setEditingIndex(null);
+  };
+
   return (
     <View style={styles.container}>
       <Text style={styles.title}>Todo List</Text>
@@ -114,7 +148,6 @@ export default function TodoScreen() {
         value={task}
         onChangeText={setTask}
         onSubmitEditing={addTask}
-        returnKeyType="done"
       />
 
       <TouchableOpacity style={styles.addButton} onPress={addTask}>
@@ -125,14 +158,41 @@ export default function TodoScreen() {
         <Text style={styles.clearButtonText}>Clear All Tasks</Text>
       </TouchableOpacity>
 
+      {showConfetti && (
+        <ConfettiCannon count={100} origin={{ x: 150, y: 0 }} fadeOut />
+      )}
+
       <FlatList
         data={tasks}
         keyExtractor={(_, index) => index.toString()}
         renderItem={({ item, index }) => (
           <View style={styles.taskRow}>
-            <Text style={styles.taskText}>• {item}</Text>
+            <TouchableOpacity
+              style={[
+                styles.checkBox,
+                item.completed && styles.checkBoxCompleted,
+              ]}
+              onPress={() => toggleComplete(index)}
+            >
+              {item.completed && <Text style={styles.checkMark}>✓</Text>}
+            </TouchableOpacity>
 
-            <View style={{ flexDirection: "row" }}>
+            <Text
+              style={[styles.taskText, item.completed && styles.completedText]}
+              numberOfLines={1}
+              ellipsizeMode="tail"
+            >
+              {item.text}
+            </Text>
+
+            <View style={styles.buttonGroup}>
+              <TouchableOpacity
+                style={styles.completeButton}
+                onPress={() => completeTask(index)}
+              >
+                <Text style={styles.completeButtonText}>Complete</Text>
+              </TouchableOpacity>
+
               <TouchableOpacity
                 style={styles.editButton}
                 onPress={() => editTask(index)}
@@ -144,14 +204,13 @@ export default function TodoScreen() {
                 style={styles.deleteButton}
                 onPress={() => deleteTask(index)}
               >
-                <Text style={styles.deleteButtonText}>Delete</Text>
+                <MaterialIcons name="delete" size={16} color="white" />
               </TouchableOpacity>
             </View>
           </View>
         )}
       />
 
-      {/* Edit Modal */}
       <Modal
         visible={editModalVisible}
         animationType="slide"
@@ -166,7 +225,6 @@ export default function TodoScreen() {
               style={styles.modalInput}
               value={editingText}
               onChangeText={setEditingText}
-              placeholder="Edit task"
             />
 
             <View style={{ flexDirection: "row", marginTop: 15 }}>
@@ -191,18 +249,12 @@ export default function TodoScreen() {
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    padding: 20,
-    marginTop: 40,
-  },
+/* Styles */
 
-  title: {
-    fontSize: 24,
-    textAlign: "center",
-    marginBottom: 10,
-  },
+const styles = StyleSheet.create({
+  container: { flex: 1, padding: 20, marginTop: 40 },
+
+  title: { fontSize: 24, textAlign: "center", marginBottom: 10 },
 
   countText: {
     fontSize: 16,
@@ -227,11 +279,7 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
 
-  addButtonText: {
-    color: "white",
-    fontSize: 14,
-    fontWeight: "600",
-  },
+  addButtonText: { color: "white", fontSize: 14, fontWeight: "600" },
 
   clearButton: {
     backgroundColor: "red",
@@ -242,46 +290,63 @@ const styles = StyleSheet.create({
     marginBottom: 15,
   },
 
-  clearButtonText: {
-    color: "white",
-    fontSize: 14,
+  clearButtonText: { color: "white", fontSize: 14 },
+
+  checkBox: {
+    width: 24,
+    height: 24,
+    borderWidth: 2,
+    borderColor: "#007AFF",
+    borderRadius: 6,
+    justifyContent: "center",
+    alignItems: "center",
+    marginRight: 10,
   },
+
+  checkBoxCompleted: { backgroundColor: "#007AFF" },
+
+  checkMark: { color: "white", fontWeight: "bold" },
+
+  taskRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    width: "100%",
+    paddingVertical: 6,
+  },
+
+  taskText: { flexShrink: 1, fontSize: 16, paddingRight: 6 },
+
+  completedText: { textDecorationLine: "line-through", color: "gray" },
+
+  buttonGroup: { flexDirection: "row", alignItems: "center" },
+
+  completeButton: {
+    backgroundColor: "#28a745",
+    paddingVertical: 4,
+    paddingHorizontal: 10,
+    borderRadius: 4,
+    marginLeft: 6,
+  },
+
+  completeButtonText: { color: "white", fontSize: 12 },
 
   editButton: {
     backgroundColor: "#FFA500",
     paddingVertical: 4,
     paddingHorizontal: 10,
     borderRadius: 4,
-    marginRight: 6,
+    marginLeft: 6,
   },
 
-  editButtonText: {
-    color: "white",
-    fontSize: 12,
-  },
+  editButtonText: { color: "white", fontSize: 12 },
 
   deleteButton: {
     backgroundColor: "#6c757d",
-    paddingVertical: 4,
-    paddingHorizontal: 10,
+    padding: 4,
     borderRadius: 4,
-  },
-
-  deleteButtonText: {
-    color: "white",
-    fontSize: 12,
-  },
-
-  taskRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
+    marginLeft: 6,
+    justifyContent: "center",
     alignItems: "center",
-    marginTop: 10,
-  },
-
-  taskText: {
-    fontSize: 16,
-    flex: 1,
   },
 
   modalOverlay: {
@@ -305,11 +370,7 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  modalInput: {
-    borderWidth: 1,
-    padding: 10,
-    borderRadius: 6,
-  },
+  modalInput: { borderWidth: 1, padding: 10, borderRadius: 6 },
 
   modalSaveButton: {
     flex: 1,

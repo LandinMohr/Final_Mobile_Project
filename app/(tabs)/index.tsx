@@ -67,16 +67,19 @@ const styles = StyleSheet.create({
     padding: 20,
     borderRadius: 10,
     marginBottom: 20,
+    textAlign: "center",
   },
 
   cardTitle: {
     fontSize: 18,
     fontWeight: "600",
     marginBottom: 10,
+    textAlign: "center",
   },
 
   taskCount: {
     fontSize: 16,
+    textAlign: "center",
   },
 
   infoText: {
