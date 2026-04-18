@@ -1,759 +1,535 @@
-/*Request foreground location permission when the user attempts to use any tracking feature. If permission is denied, show a clear message explaining that location access is required.
-Display the user’s current latitude and longitude on screen when a “Get Current Location” action is triggered.
-Add controls to start and stop live location tracking while the app is open. When live tracking is active, continuously update the displayed coordinates.
-Implement background location tracking so coordinates continue to be logged even when the app is minimized or not in focus.
-Persist location logs locally so previously recorded coordinates are still available after the app is closed and reopened.
-Add a pause/resume toggle that temporarily stops recording new location updates without fully stopping the tracking session.
-Display a clear privacy notice on the tracking screen that explains:
-What location data is collected
-When location data is collected
-That the data is stored locally for this app
-How the user can pause or stop tracking at any time
-Verify that the app behaves correctly when switching between foreground, background, paused, and stopped states
-.*/
-import { ThemedText } from "@/components/themed-text";
-import { ThemedView } from "@/components/themed-view";
-import { useColorScheme } from "@/hooks/use-color-scheme";
-import AsyncStorage from "@react-native-async-storage/async-storage";
-import * as Location from "expo-location";
-import * as TaskManager from "expo-task-manager";
-import { useEffect, useRef, useState } from "react";
+import { LocationSubscription } from "expo-location";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
-  ActivityIndicator,
   Alert,
-  Button,
+  Platform,
+  Pressable,
   ScrollView,
   StyleSheet,
   View,
 } from "react-native";
 
-const LOCATION_TRACKING_TASK = "location-tracking-task";
-const LOCATION_LOGS_STORAGE_KEY = "location_logs";
-const IS_TRACKING_STORAGE_KEY = "is_tracking";
-const IS_PAUSED_STORAGE_KEY = "is_paused";
+import { ThemedText } from "@/components/themed-text";
+import { ThemedView } from "@/components/themed-view";
+import { Colors } from "@/constants/theme";
+import { useColorScheme } from "@/hooks/use-color-scheme";
+import {
+  appendLocationEntry,
+  clearLocationLogs,
+  loadLocationLogs,
+  LocationEntry,
+} from "@/lib/location-repo";
+import {
+  getCurrentLocation,
+  requestBackgroundPermission,
+  requestForegroundPermission,
+  startBackgroundTracking,
+  startForegroundTracking,
+  stopBackgroundTracking,
+} from "@/lib/location-service";
 
-// Define background location tracking task
-TaskManager.defineTask(
-  LOCATION_TRACKING_TASK,
-  async ({ data: taskData, error }: any) => {
-    if (error) {
-      console.error("Background location task error:", error);
-      return;
-    }
-
-    if (taskData) {
-      const { locations } = taskData;
-      if (locations && locations.length > 0) {
-        const location = locations[0];
-        try {
-          const existingLogs = await AsyncStorage.getItem(
-            LOCATION_LOGS_STORAGE_KEY,
-          );
-          const logs = existingLogs ? JSON.parse(existingLogs) : [];
-          logs.push({
-            latitude: location.coords.latitude,
-            longitude: location.coords.longitude,
-            accuracy: location.coords.accuracy,
-            timestamp: new Date().toISOString(),
-          });
-          await AsyncStorage.setItem(
-            LOCATION_LOGS_STORAGE_KEY,
-            JSON.stringify(logs),
-          );
-        } catch (err) {
-          console.error("Error saving background location:", err);
-        }
-      }
-    }
-  },
-);
-
-interface LocationLog {
-  latitude: number;
-  longitude: number;
-  accuracy: number;
-  timestamp: string;
-}
+type PermissionStatus = "unknown" | "granted" | "denied";
+type TrackingState = "idle" | "active" | "paused";
 
 export default function LocationDemoScreen() {
   const colorScheme = useColorScheme();
-  const [currentLocation, setCurrentLocation] = useState<{
-    latitude: number;
-    longitude: number;
-    accuracy: number | null;
-  } | null>(null);
-  const [isTracking, setIsTracking] = useState(false);
-  const [isPaused, setIsPaused] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [permissionStatus, setPermissionStatus] =
-    useState<Location.PermissionStatus | null>(null);
-  const [locationLogs, setLocationLogs] = useState<LocationLog[]>([]);
-  const [showPrivacyNotice, setShowPrivacyNotice] = useState(false);
-  const trackingIntervalRef = useRef<number | NodeJS.Timeout | null>(null);
+  const colors = Colors[colorScheme ?? "light"];
 
-  // Initialize: load saved state and logs on mount
+  const [permissionStatus, setPermissionStatus] =
+    useState<PermissionStatus>("unknown");
+  const [backgroundGranted, setBackgroundGranted] = useState(false);
+  const [trackingState, setTrackingState] = useState<TrackingState>("idle");
+  const [currentLocation, setCurrentLocation] = useState<LocationEntry | null>(
+    null,
+  );
+  const [logs, setLogs] = useState<LocationEntry[]>([]);
+  const [isLoadingLocation, setIsLoadingLocation] = useState(false);
+
+  const subscriptionRef = useRef<LocationSubscription | null>(null);
+
+  // Load persisted logs on mount
   useEffect(() => {
-    initializeTracking();
+    loadLocationLogs().then(setLogs);
+  }, []);
+
+  // Stop tracking and remove subscription on unmount
+  useEffect(() => {
     return () => {
-      if (trackingIntervalRef.current) {
-        clearInterval(trackingIntervalRef.current);
-      }
+      subscriptionRef.current?.remove();
+      stopBackgroundTracking().catch(() => {});
     };
   }, []);
 
-  const initializeTracking = async () => {
+  // ── Permission ──────────────────────────────────────────────────────────────
+
+  const ensureForegroundPermission = useCallback(async (): Promise<boolean> => {
+    if (permissionStatus === "granted") return true;
+    const granted = await requestForegroundPermission();
+    setPermissionStatus(granted ? "granted" : "denied");
+    return granted;
+  }, [permissionStatus]);
+
+  // ── One-shot location ────────────────────────────────────────────────────────
+
+  const handleGetCurrentLocation = useCallback(async () => {
+    const ok = await ensureForegroundPermission();
+    if (!ok) return;
+    setIsLoadingLocation(true);
     try {
-      // Load saved location logs
-      const savedLogs = await AsyncStorage.getItem(LOCATION_LOGS_STORAGE_KEY);
-      if (savedLogs) {
-        setLocationLogs(JSON.parse(savedLogs));
-      }
-
-      // Check if we were tracking before
-      const wasTracking = await AsyncStorage.getItem(IS_TRACKING_STORAGE_KEY);
-      if (wasTracking === "true") {
-        setIsTracking(true);
-        const wasPaused = await AsyncStorage.getItem(IS_PAUSED_STORAGE_KEY);
-        setIsPaused(wasPaused === "true");
-      }
-    } catch (err) {
-      console.error("Error initializing tracking:", err);
-    }
-  };
-
-  const requestPermission = async (): Promise<boolean> => {
-    try {
-      const foregroundStatus =
-        await Location.requestForegroundPermissionsAsync();
-      setPermissionStatus(foregroundStatus.status);
-
-      if (foregroundStatus.granted) {
-        // Also request background permission for tracking
-        await Location.requestBackgroundPermissionsAsync();
-        return true;
-      } else {
-        Alert.alert(
-          "Location Permission Required",
-          "Location access is required to use tracking features. Please enable location permissions in your device settings.",
-          [{ text: "OK" }],
-        );
-        return false;
-      }
-    } catch (err) {
-      console.error("Permission error:", err);
-      Alert.alert("Error", "Failed to request location permissions");
-      return false;
-    }
-  };
-
-  const getCurrentLocation = async () => {
-    setLoading(true);
-    try {
-      // Check permission first
-      const { status } = await Location.getForegroundPermissionsAsync();
-      if (status !== "granted") {
-        const granted = await requestPermission();
-        if (!granted) {
-          setLoading(false);
-          return;
-        }
-      }
-
-      const location = await Location.getCurrentPositionAsync({
-        accuracy: Location.Accuracy.High,
+      const loc = await getCurrentLocation();
+      setCurrentLocation({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+        accuracy: loc.coords.accuracy,
+        timestamp: loc.timestamp,
       });
-
-      const newLocation = {
-        latitude: location.coords.latitude,
-        longitude: location.coords.longitude,
-        accuracy: location.coords.accuracy,
-      };
-
-      setCurrentLocation(newLocation);
-
-      // Only log if tracking is active and not paused
-      if (isTracking && !isPaused) {
-        await logLocation(newLocation);
-      }
-    } catch (err) {
-      console.error("Error getting location:", err);
-      Alert.alert("Error", "Failed to get current location");
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const logLocation = async (location: typeof currentLocation) => {
-    try {
-      if (!location) return;
-      const existingLogs = await AsyncStorage.getItem(
-        LOCATION_LOGS_STORAGE_KEY,
-      );
-      const logs = existingLogs ? JSON.parse(existingLogs) : [];
-      logs.push({
-        latitude: location.latitude,
-        longitude: location.longitude,
-        accuracy: location.accuracy,
-        timestamp: new Date().toISOString(),
-      });
-      await AsyncStorage.setItem(
-        LOCATION_LOGS_STORAGE_KEY,
-        JSON.stringify(logs),
-      );
-      setLocationLogs(logs);
-    } catch (err) {
-      console.error("Error logging location:", err);
-    }
-  };
-
-  const startTracking = async () => {
-    try {
-      const granted = await requestPermission();
-      if (!granted) return;
-
-      setIsTracking(true);
-      setIsPaused(false);
-      await AsyncStorage.setItem(IS_TRACKING_STORAGE_KEY, "true");
-      await AsyncStorage.setItem(IS_PAUSED_STORAGE_KEY, "false");
-
-      // Start foreground tracking (every 10 seconds)
-      if (trackingIntervalRef.current) {
-        clearInterval(trackingIntervalRef.current);
-      }
-
-      trackingIntervalRef.current = setInterval(async () => {
-        const paused = await AsyncStorage.getItem(IS_PAUSED_STORAGE_KEY);
-        if (paused !== "true") {
-          const location = await Location.getCurrentPositionAsync({
-            accuracy: Location.Accuracy.Balanced,
-          });
-
-          const newLocation = {
-            latitude: location.coords.latitude,
-            longitude: location.coords.longitude,
-            accuracy: location.coords.accuracy,
-          };
-
-          setCurrentLocation(newLocation);
-          await logLocation(newLocation);
-        }
-      }, 10000); // Update every 10 seconds
-
-      // Start background tracking
-      try {
-        await Location.startLocationUpdatesAsync(LOCATION_TRACKING_TASK, {
-          accuracy: Location.Accuracy.Balanced,
-          timeInterval: 10000, // 10 seconds
-          distanceInterval: 10, // or 10 meters
-          showsBackgroundLocationIndicator: true,
-          foregroundService: {
-            notificationTitle: "Location Tracking",
-            notificationBody: "Your location is being tracked for this app",
-          },
-        });
-      } catch (err) {
-        console.warn("Background location might not be available:", err);
-      }
-
-      Alert.alert("Tracking Started", "Live location tracking is now active");
-    } catch (err) {
-      console.error("Error starting tracking:", err);
-      Alert.alert("Error", "Failed to start tracking");
-      setIsTracking(false);
-    }
-  };
-
-  const stopTracking = async () => {
-    try {
-      setIsTracking(false);
-      setIsPaused(false);
-      setCurrentLocation(null);
-      await AsyncStorage.setItem(IS_TRACKING_STORAGE_KEY, "false");
-      await AsyncStorage.setItem(IS_PAUSED_STORAGE_KEY, "false");
-
-      if (trackingIntervalRef.current) {
-        clearInterval(trackingIntervalRef.current);
-        trackingIntervalRef.current = null;
-      }
-
-      try {
-        await Location.stopLocationUpdatesAsync(LOCATION_TRACKING_TASK);
-      } catch (err) {
-        console.warn("Background location might already be stopped:", err);
-      }
-
-      Alert.alert("Tracking Stopped", "Location tracking has been stopped");
-    } catch (err) {
-      console.error("Error stopping tracking:", err);
-      Alert.alert("Error", "Failed to stop tracking");
-    }
-  };
-
-  const togglePause = async () => {
-    try {
-      const newPausedState = !isPaused;
-      setIsPaused(newPausedState);
-      await AsyncStorage.setItem(
-        IS_PAUSED_STORAGE_KEY,
-        newPausedState ? "true" : "false",
-      );
-
-      const message = newPausedState
-        ? "Tracking paused - new locations will not be recorded"
-        : "Tracking resumed - recording locations";
+    } catch {
       Alert.alert(
-        "Tracking " + (newPausedState ? "Paused" : "Resumed"),
-        message,
+        "Error",
+        "Failed to retrieve current location. Make sure GPS is enabled.",
       );
-    } catch (err) {
-      console.error("Error toggling pause:", err);
+    } finally {
+      setIsLoadingLocation(false);
     }
-  };
+  }, [ensureForegroundPermission]);
 
-  const clearLogs = async () => {
+  // ── Shared update handler ────────────────────────────────────────────────────
+
+  const handleLocationUpdate = useCallback(async (entry: LocationEntry) => {
+    setCurrentLocation(entry);
+    await appendLocationEntry(entry);
+    setLogs((prev) => [...prev, entry].slice(-500));
+  }, []);
+
+  // ── Start ────────────────────────────────────────────────────────────────────
+
+  const handleStartTracking = useCallback(async () => {
+    const ok = await ensureForegroundPermission();
+    if (!ok) return;
+
+    const sub = await startForegroundTracking(handleLocationUpdate);
+    subscriptionRef.current = sub;
+
+    const bgGranted = await requestBackgroundPermission();
+    setBackgroundGranted(bgGranted);
+    if (bgGranted) {
+      await startBackgroundTracking().catch((err) =>
+        console.warn("Background tracking unavailable:", err),
+      );
+    }
+
+    setTrackingState("active");
+  }, [ensureForegroundPermission, handleLocationUpdate]);
+
+  // ── Pause ────────────────────────────────────────────────────────────────────
+
+  const handlePauseTracking = useCallback(async () => {
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    await stopBackgroundTracking().catch(() => {});
+    setTrackingState("paused");
+  }, []);
+
+  // ── Resume ───────────────────────────────────────────────────────────────────
+
+  const handleResumeTracking = useCallback(async () => {
+    const sub = await startForegroundTracking(handleLocationUpdate);
+    subscriptionRef.current = sub;
+
+    if (backgroundGranted) {
+      await startBackgroundTracking().catch((err) =>
+        console.warn("Background tracking unavailable:", err),
+      );
+    }
+
+    setTrackingState("active");
+  }, [backgroundGranted, handleLocationUpdate]);
+
+  // ── Stop ─────────────────────────────────────────────────────────────────────
+
+  const handleStopTracking = useCallback(async () => {
+    subscriptionRef.current?.remove();
+    subscriptionRef.current = null;
+    await stopBackgroundTracking().catch(() => {});
+    setTrackingState("idle");
+  }, []);
+
+  // ── Clear logs ───────────────────────────────────────────────────────────────
+
+  const handleClearLogs = useCallback(() => {
     Alert.alert(
       "Clear Location Logs",
-      "Are you sure you want to delete all recorded locations?",
+      "This will permanently delete all saved coordinates.",
       [
+        { text: "Cancel", style: "cancel" },
         {
-          text: "Cancel",
-          onPress: () => {},
-          style: "cancel",
-        },
-        {
-          text: "Delete",
-          onPress: async () => {
-            try {
-              await AsyncStorage.removeItem(LOCATION_LOGS_STORAGE_KEY);
-              setLocationLogs([]);
-              Alert.alert("Success", "All location logs have been cleared");
-            } catch (err) {
-              Alert.alert("Error", "Failed to clear logs");
-            }
-          },
+          text: "Delete All",
           style: "destructive",
+          onPress: async () => {
+            await clearLocationLogs();
+            setLogs([]);
+          },
         },
       ],
     );
-  };
+  }, []);
+
+  // ── Helpers ──────────────────────────────────────────────────────────────────
+
+  const formatCoords = (entry: LocationEntry) =>
+    `${entry.latitude.toFixed(6)},  ${entry.longitude.toFixed(6)}`;
+
+  const formatTime = (ts: number) => new Date(ts).toLocaleTimeString();
+
+  const trackingColor =
+    trackingState === "active"
+      ? "#2e7d32"
+      : trackingState === "paused"
+        ? "#e65100"
+        : colors.icon;
+
+  const trackingLabel =
+    trackingState === "active"
+      ? "Active"
+      : trackingState === "paused"
+        ? "Paused"
+        : "Stopped";
+
+  // ── Render ───────────────────────────────────────────────────────────────────
 
   return (
     <ThemedView style={styles.container}>
       <ScrollView
-        style={styles.scrollView}
+        contentContainerStyle={styles.scrollContent}
         showsVerticalScrollIndicator={false}
       >
-        <ThemedText style={styles.title}>Location Tracking</ThemedText>
-
-        {/* Privacy Notice */}
-        <View style={styles.privacyNoticeSection}>
-          <ThemedText style={styles.sectionTitle}>📋 Privacy Notice</ThemedText>
-          <View
-            style={[
-              styles.privacyNotice,
-              {
-                backgroundColor:
-                  colorScheme === "dark"
-                    ? showPrivacyNotice
-                      ? "#2a3a2a"
-                      : "#1e1f20"
-                    : showPrivacyNotice
-                      ? "#e8f5e9"
-                      : "#f5f5f5",
-              },
-            ]}
-          >
-            <ThemedText style={styles.privacyTitle}>
-              What We Collect:
+        {/* ── Privacy Notice ───────────────────────────────────────────────── */}
+        <View style={[styles.privacyCard, { borderColor: colors.tint }]}>
+          <ThemedText type="defaultSemiBold" style={styles.privacyTitle}>
+            Privacy Notice
+          </ThemedText>
+          <ThemedText style={styles.privacyLine}>
+            <ThemedText type="defaultSemiBold">What is collected: </ThemedText>
+            GPS coordinates (latitude, longitude, accuracy).
+          </ThemedText>
+          <ThemedText style={styles.privacyLine}>
+            <ThemedText type="defaultSemiBold">
+              When it is collected:{" "}
             </ThemedText>
-            <ThemedText style={styles.privacyText}>
-              • Your GPS coordinates (latitude & longitude){"\n"}• Location
-              accuracy information
-              {"\n"}• Timestamp of each location update
-            </ThemedText>
-
-            <ThemedText style={styles.privacyTitle}>
-              When We Collect It:
-            </ThemedText>
-            <ThemedText style={styles.privacyText}>
-              • Only when you start tracking{"\n"}• Continuously while tracking
-              is active
-              {"\n"}• Even if the app is in background (while enabled)
-            </ThemedText>
-
-            <ThemedText style={styles.privacyTitle}>Data Storage:</ThemedText>
-            <ThemedText style={styles.privacyText}>
-              • All location data is stored locally on your device{"\n"}• No
-              data is sent to external servers{"\n"}• Data persists between app
-              sessions
-            </ThemedText>
-
-            <ThemedText style={styles.privacyTitle}>Your Control:</ThemedText>
-            <ThemedText style={styles.privacyText}>
-              • Pause tracking without stopping the session{"\n"}• Resume
-              tracking at any time
-              {"\n"}• Stop tracking completely{"\n"}• Delete all recorded
-              locations
-            </ThemedText>
-          </View>
+            Only while tracking is active — both when the app is open
+            (foreground) and minimized (background, if permission is granted).
+          </ThemedText>
+          <ThemedText style={styles.privacyLine}>
+            <ThemedText type="defaultSemiBold">Where it is stored: </ThemedText>
+            Locally on this device only. Data is never sent to any server.
+          </ThemedText>
+          <ThemedText style={styles.privacyLine}>
+            <ThemedText type="defaultSemiBold">Your control: </ThemedText>
+            Tap <ThemedText type="defaultSemiBold">Pause</ThemedText> to
+            temporarily stop recording. Tap{" "}
+            <ThemedText type="defaultSemiBold">Stop</ThemedText> to end the
+            session. Tap{" "}
+            <ThemedText type="defaultSemiBold">Clear Logs</ThemedText> to delete
+            all saved data.
+          </ThemedText>
         </View>
 
-        {/* Current Location Display */}
-        <View style={styles.section}>
-          <ThemedText style={styles.sectionTitle}>
-            📍 Current Location
-          </ThemedText>
-          {loading ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" />
-              <ThemedText style={styles.loadingText}>
-                Getting location...
-              </ThemedText>
-            </View>
-          ) : currentLocation ? (
-            <View
-              style={[
-                styles.locationDisplay,
-                {
-                  backgroundColor:
-                    colorScheme === "dark" ? "#1e1f20" : "#f9f9f9",
-                },
-              ]}
-            >
-              <ThemedText style={styles.coordinateLabel}>Latitude:</ThemedText>
-              <ThemedText style={styles.coordinateValue}>
-                {currentLocation.latitude.toFixed(6)}
-              </ThemedText>
-
-              <ThemedText style={styles.coordinateLabel}>Longitude:</ThemedText>
-              <ThemedText style={styles.coordinateValue}>
-                {currentLocation.longitude.toFixed(6)}
-              </ThemedText>
-
-              <ThemedText style={styles.coordinateLabel}>Accuracy:</ThemedText>
-              <ThemedText style={styles.coordinateValue}>
-                {currentLocation.accuracy?.toFixed(1) || "N/A"} meters
-              </ThemedText>
-
-              <ThemedText style={styles.timestampText}>
-                Last updated: {new Date().toLocaleTimeString()}
-              </ThemedText>
-            </View>
-          ) : (
-            <ThemedText style={styles.noLocationText}>
-              No location data available yet
+        {/* ── Permission Denied Banner ─────────────────────────────────────── */}
+        {permissionStatus === "denied" && (
+          <View style={styles.deniedBanner}>
+            <ThemedText style={styles.deniedText}>
+              Location access is required to use this feature. Please enable it
+              in your device Settings &gt; Privacy &gt; Location Services.
             </ThemedText>
-          )}
-
-          <View style={styles.buttonContainer}>
-            <Button
-              title="Get Current Location"
-              onPress={getCurrentLocation}
-              disabled={loading}
-            />
           </View>
-        </View>
+        )}
 
-        {/* Tracking Controls */}
-        <View style={styles.section}>
-          <ThemedText style={styles.sectionTitle}>
-            🎮 Tracking Controls
+        {/* ── Current Coordinates ──────────────────────────────────────────── */}
+        <View style={[styles.coordCard, { borderColor: colors.icon }]}>
+          <ThemedText type="subtitle" style={styles.coordTitle}>
+            Current Location
           </ThemedText>
-
-          <View
-            style={[
-              styles.trackingStatus,
-              {
-                backgroundColor: colorScheme === "dark" ? "#1e1f20" : "#f9f9f9",
-              },
-            ]}
-          >
-            <View style={styles.statusRow}>
-              <ThemedText style={styles.statusLabel}>
-                Tracking Active:
+          {currentLocation ? (
+            <>
+              <ThemedText style={[styles.coordValue, { color: colors.text }]}>
+                Lat: {currentLocation.latitude.toFixed(6)}
               </ThemedText>
-              <View
-                style={[
-                  styles.statusIndicator,
-                  { backgroundColor: isTracking ? "#4CAF50" : "#ccc" },
-                ]}
-              />
-            </View>
-
-            {isTracking && (
-              <View style={styles.statusRow}>
-                <ThemedText style={styles.statusLabel}>
-                  Tracking Paused:
+              <ThemedText style={[styles.coordValue, { color: colors.text }]}>
+                Lng: {currentLocation.longitude.toFixed(6)}
+              </ThemedText>
+              {currentLocation.accuracy != null && (
+                <ThemedText style={[styles.coordMeta, { color: colors.icon }]}>
+                  Accuracy: ±{currentLocation.accuracy.toFixed(0)} m
                 </ThemedText>
-                <View
-                  style={[
-                    styles.statusIndicator,
-                    { backgroundColor: isPaused ? "#FF9800" : "#4CAF50" },
-                  ]}
-                />
-              </View>
-            )}
-
-            <ThemedText style={styles.logCountText}>
-              Total locations recorded: {locationLogs.length}
-            </ThemedText>
-          </View>
-
-          <View style={styles.controlButtonsContainer}>
-            {!isTracking ? (
-              <View style={styles.buttonContainer}>
-                <Button
-                  title="Start Tracking"
-                  onPress={startTracking}
-                  color="#4CAF50"
-                />
-              </View>
-            ) : (
-              <>
-                <View style={styles.buttonContainer}>
-                  <Button
-                    title={isPaused ? "Resume Tracking" : "Pause Tracking"}
-                    onPress={togglePause}
-                    color="#FF9800"
-                  />
-                </View>
-                <View style={styles.buttonContainer}>
-                  <Button
-                    title="Stop Tracking"
-                    onPress={stopTracking}
-                    color="#f44336"
-                  />
-                </View>
-              </>
-            )}
-          </View>
-        </View>
-
-        {/* Location Logs */}
-        <View style={styles.section}>
-          <View style={styles.logsHeader}>
-            <ThemedText style={styles.sectionTitle}>
-              📝 Location History
-            </ThemedText>
-            {locationLogs.length > 0 && (
-              <View style={styles.clearButtonContainer}>
-                <Button title="Clear All" onPress={clearLogs} color="#f44336" />
-              </View>
-            )}
-          </View>
-
-          {locationLogs.length === 0 ? (
-            <ThemedText style={styles.noLogsText}>
-              No locations recorded yet. Start tracking to begin recording
-              locations.
-            </ThemedText>
-          ) : (
-            <ScrollView
-              style={styles.logsList}
-              nestedScrollEnabled={true}
-              scrollEnabled={false}
-            >
-              {locationLogs.slice(-10).map((log, index) => (
-                <View
-                  key={index}
-                  style={[
-                    styles.logEntry,
-                    {
-                      backgroundColor:
-                        colorScheme === "dark" ? "#1e1f20" : "#f9f9f9",
-                    },
-                  ]}
-                >
-                  <ThemedText style={styles.logIndex}>
-                    #{locationLogs.length - index}
-                  </ThemedText>
-                  <View style={styles.logDetails}>
-                    <ThemedText style={styles.logCoordinates}>
-                      {log.latitude.toFixed(6)}, {log.longitude.toFixed(6)}
-                    </ThemedText>
-                    <ThemedText style={styles.logInfo}>
-                      Accuracy: {log.accuracy?.toFixed(1) || "N/A"}m
-                    </ThemedText>
-                    <ThemedText style={styles.logTimestamp}>
-                      {new Date(log.timestamp).toLocaleString()}
-                    </ThemedText>
-                  </View>
-                </View>
-              ))}
-              <ThemedText style={styles.moreLogsText}>
-                {locationLogs.length > 10
-                  ? `... and ${locationLogs.length - 10} more locations`
-                  : ""}
+              )}
+              <ThemedText style={[styles.coordMeta, { color: colors.icon }]}>
+                {formatTime(currentLocation.timestamp)}
               </ThemedText>
-            </ScrollView>
+            </>
+          ) : (
+            <ThemedText style={{ color: colors.icon }}>
+              No location yet. Tap "Get Current Location" or start tracking.
+            </ThemedText>
           )}
         </View>
+
+        {/* ── Tracking Status ───────────────────────────────────────────────── */}
+        <View style={styles.statusRow}>
+          <ThemedText type="defaultSemiBold">Tracking: </ThemedText>
+          <ThemedText style={{ color: trackingColor, fontWeight: "600" }}>
+            {trackingLabel}
+          </ThemedText>
+          {backgroundGranted && trackingState !== "idle" && (
+            <ThemedText style={[styles.bgBadge, { color: colors.icon }]}>
+              {" "}
+              + background
+            </ThemedText>
+          )}
+        </View>
+
+        {/* ── Action Buttons ───────────────────────────────────────────────── */}
+        <Pressable
+          style={[
+            styles.btn,
+            { backgroundColor: colors.tint },
+            isLoadingLocation && styles.btnDisabled,
+          ]}
+          onPress={handleGetCurrentLocation}
+          disabled={isLoadingLocation}
+          accessibilityRole="button"
+          accessibilityLabel="Get current location"
+        >
+          <ThemedText style={styles.btnText}>
+            {isLoadingLocation ? "Locating…" : "Get Current Location"}
+          </ThemedText>
+        </Pressable>
+
+        {trackingState === "idle" && (
+          <Pressable
+            style={[styles.btn, styles.btnGreen]}
+            onPress={handleStartTracking}
+            accessibilityRole="button"
+            accessibilityLabel="Start tracking"
+          >
+            <ThemedText style={styles.btnText}>Start Tracking</ThemedText>
+          </Pressable>
+        )}
+
+        {trackingState === "active" && (
+          <>
+            <Pressable
+              style={[styles.btn, styles.btnOrange]}
+              onPress={handlePauseTracking}
+              accessibilityRole="button"
+              accessibilityLabel="Pause tracking"
+            >
+              <ThemedText style={styles.btnText}>Pause Tracking</ThemedText>
+            </Pressable>
+            <Pressable
+              style={[styles.btn, styles.btnRed]}
+              onPress={handleStopTracking}
+              accessibilityRole="button"
+              accessibilityLabel="Stop tracking"
+            >
+              <ThemedText style={styles.btnText}>Stop Tracking</ThemedText>
+            </Pressable>
+          </>
+        )}
+
+        {trackingState === "paused" && (
+          <>
+            <Pressable
+              style={[styles.btn, styles.btnGreen]}
+              onPress={handleResumeTracking}
+              accessibilityRole="button"
+              accessibilityLabel="Resume tracking"
+            >
+              <ThemedText style={styles.btnText}>Resume Tracking</ThemedText>
+            </Pressable>
+            <Pressable
+              style={[styles.btn, styles.btnRed]}
+              onPress={handleStopTracking}
+              accessibilityRole="button"
+              accessibilityLabel="Stop tracking"
+            >
+              <ThemedText style={styles.btnText}>Stop Tracking</ThemedText>
+            </Pressable>
+          </>
+        )}
+
+        {/* ── Location Log ─────────────────────────────────────────────────── */}
+        <View style={styles.logsHeader}>
+          <ThemedText type="subtitle">
+            Location Log{logs.length > 0 ? ` (${logs.length})` : ""}
+          </ThemedText>
+          {logs.length > 0 && (
+            <Pressable
+              onPress={handleClearLogs}
+              accessibilityRole="button"
+              accessibilityLabel="Clear all location logs"
+            >
+              <ThemedText style={styles.clearBtn}>Clear Logs</ThemedText>
+            </Pressable>
+          )}
+        </View>
+
+        {logs.length === 0 ? (
+          <ThemedText style={{ color: colors.icon, marginBottom: 16 }}>
+            No location entries recorded yet.
+          </ThemedText>
+        ) : (
+          [...logs]
+            .reverse()
+            .slice(0, 50)
+            .map((entry, i) => (
+              <View
+                key={`${entry.timestamp}-${i}`}
+                style={[styles.logRow, { borderColor: colors.icon }]}
+              >
+                <ThemedText style={[styles.logCoord, { color: colors.text }]}>
+                  {formatCoords(entry)}
+                </ThemedText>
+                <ThemedText style={[styles.logTime, { color: colors.icon }]}>
+                  {formatTime(entry.timestamp)}
+                </ThemedText>
+              </View>
+            ))
+        )}
       </ScrollView>
     </ThemedView>
   );
 }
 
+const MONO = Platform.select({ ios: "ui-monospace", default: "monospace" });
+
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    paddingHorizontal: 16,
   },
-  scrollView: {
-    flex: 1,
-    paddingVertical: 12,
-  },
-  title: {
-    fontSize: 28,
-    fontWeight: "bold",
-    marginBottom: 20,
-    marginTop: 8,
-  },
-  section: {
-    marginBottom: 24,
-    paddingHorizontal: 12,
-  },
-  sectionTitle: {
-    fontSize: 18,
-    fontWeight: "600",
-    marginBottom: 12,
-  },
-  privacyNoticeSection: {
-    marginBottom: 24,
-    paddingHorizontal: 12,
-  },
-  privacyNotice: {
+  scrollContent: {
     padding: 16,
+    paddingTop: 56,
+    paddingBottom: 40,
+  },
+
+  // Privacy card
+  privacyCard: {
+    borderWidth: 1,
     borderRadius: 12,
-    backgroundColor: "#f5f5f5",
+    padding: 14,
+    marginBottom: 16,
+    gap: 6,
   },
   privacyTitle: {
+    fontSize: 15,
+    marginBottom: 4,
+  },
+  privacyLine: {
+    fontSize: 13,
+    lineHeight: 20,
+  },
+
+  // Denied banner
+  deniedBanner: {
+    backgroundColor: "#fdecea",
+    borderRadius: 10,
+    padding: 12,
+    marginBottom: 16,
+  },
+  deniedText: {
+    color: "#b71c1c",
     fontSize: 14,
-    fontWeight: "600",
-    marginTop: 10,
+    lineHeight: 20,
+  },
+
+  // Coord card
+  coordCard: {
+    borderWidth: 1,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    gap: 4,
+  },
+  coordTitle: {
     marginBottom: 6,
   },
-  privacyText: {
-    fontSize: 12,
-    lineHeight: 18,
-    marginBottom: 4,
+  coordValue: {
+    fontSize: 18,
+    fontWeight: "600",
+    fontFamily: MONO,
+    letterSpacing: 0.5,
   },
-  loadingContainer: {
-    alignItems: "center",
-    paddingVertical: 20,
+  coordMeta: {
+    fontSize: 13,
+    marginTop: 2,
   },
-  loadingText: {
-    marginTop: 10,
-    fontSize: 14,
-  },
-  locationDisplay: {
-    backgroundColor: "#f9f9f9",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 8,
-    marginBottom: 12,
-  },
-  coordinateLabel: {
-    fontSize: 12,
-    marginTop: 8,
-    fontWeight: "500",
-  },
-  coordinateValue: {
-    fontSize: 16,
-    fontWeight: "bold",
-    marginBottom: 4,
-  },
-  timestampText: {
-    fontSize: 11,
-    marginTop: 8,
-    fontStyle: "italic",
-  },
-  noLocationText: {
-    textAlign: "center",
-    paddingVertical: 16,
-    fontSize: 14,
-  },
-  buttonContainer: {
-    marginBottom: 8,
-  },
-  trackingStatus: {
-    backgroundColor: "#f9f9f9",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    borderRadius: 8,
-    marginBottom: 12,
-  },
+
+  // Status row
   statusRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: 14,
   },
-  statusLabel: {
-    flex: 1,
-    fontSize: 14,
-    fontWeight: "500",
-  },
-  statusIndicator: {
-    width: 12,
-    height: 12,
-    borderRadius: 6,
-  },
-  logCountText: {
+  bgBadge: {
     fontSize: 13,
-    marginTop: 8,
-    fontWeight: "500",
   },
-  controlButtonsContainer: {
-    gap: 8,
+
+  // Buttons
+  btn: {
+    borderRadius: 10,
+    paddingVertical: 13,
+    paddingHorizontal: 20,
+    alignItems: "center",
+    marginBottom: 10,
   },
+  btnDisabled: {
+    opacity: 0.55,
+  },
+  btnGreen: {
+    backgroundColor: "#2e7d32",
+  },
+  btnOrange: {
+    backgroundColor: "#e65100",
+  },
+  btnRed: {
+    backgroundColor: "#b71c1c",
+  },
+  btnText: {
+    color: "#fff",
+    fontSize: 16,
+    fontWeight: "600",
+  },
+
+  // Logs
   logsHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 12,
+    marginTop: 22,
+    marginBottom: 10,
   },
-  clearButtonContainer: {
-    width: 80,
-  },
-  logsList: {
-    maxHeight: 400,
-  },
-  logEntry: {
-    flexDirection: "row",
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    backgroundColor: "#f9f9f9",
-    borderRadius: 8,
-    marginBottom: 8,
-  },
-  logIndex: {
-    fontWeight: "bold",
+  clearBtn: {
+    color: "#b71c1c",
     fontSize: 14,
-    width: 40,
-  },
-  logDetails: {
-    flex: 1,
-  },
-  logCoordinates: {
-    fontSize: 13,
     fontWeight: "600",
-    marginBottom: 4,
   },
-  logInfo: {
-    fontSize: 12,
-    marginBottom: 2,
-  },
-  logTimestamp: {
-    fontSize: 11,
-  },
-  moreLogsText: {
-    textAlign: "center",
-    fontSize: 12,
+  logRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     paddingVertical: 8,
-    fontStyle: "italic",
+    paddingHorizontal: 12,
+    borderWidth: 1,
+    borderRadius: 8,
+    marginBottom: 6,
   },
-  noLogsText: {
-    textAlign: "center",
-    paddingVertical: 16,
-    fontSize: 14,
+  logCoord: {
+    fontSize: 13,
+    fontFamily: MONO,
+    flex: 1,
+    marginRight: 8,
+  },
+  logTime: {
+    fontSize: 12,
   },
 });
