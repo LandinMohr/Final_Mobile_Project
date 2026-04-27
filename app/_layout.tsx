@@ -59,6 +59,17 @@ export default function TabLayout() {
           ),
         }}
       />
+
+      <Tabs.Screen
+        name="[id]"
+        options={{
+          title: "Detail",
+          tabBarIcon: ({ color }) => (
+            <IconSymbol size={24} name="info.circle.fill" color={color} />
+          ),
+        }}
+        initialParams={{ id: "7" }}
+      />
     </Tabs>
   );
 }

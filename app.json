@@ -8,6 +8,35 @@
     "scheme": "finalmobileproject",
     "userInterfaceStyle": "automatic",
     "newArchEnabled": true,
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://finalmobileproject.app"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff",
+          "dark": {
+            "backgroundColor": "#000000"
+          }
+        }
+      ],
+      "expo-sqlite"
+    ],
+    "deepLinkingInfoProduction": {
+      "schemes": ["finalmobileproject", "https"],
+      "prefixes": [
+        "finalmobileproject://",
+        "https://finalmobileproject.app/",
+        "https://finalmobileproject.app"
+      ]
+    },
     "ios": {
       "supportsTablet": true
     },
@@ -25,22 +54,6 @@
       "output": "static",
       "favicon": "./assets/images/favicon.png"
     },
-    "plugins": [
-      "expo-router",
-      [
-        "expo-splash-screen",
-        {
-          "image": "./assets/images/splash-icon.png",
-          "imageWidth": 200,
-          "resizeMode": "contain",
-          "backgroundColor": "#ffffff",
-          "dark": {
-            "backgroundColor": "#000000"
-          }
-        }
-      ],
-      "expo-sqlite"
-    ],
     "experiments": {
       "typedRoutes": true,
       "reactCompiler": true
